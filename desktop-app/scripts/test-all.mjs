@@ -40,6 +40,7 @@ const SUITES = [
   'cooldown-regression.mjs',
   'delivery-throttle-regression.mjs',
   'score-regression.mjs',
+  'local-match-review-regression.mjs',
   'mock-interview-score-regression.mjs',
   'mock-interview-delivery-regression.mjs',
   'bank-recall-regression.mjs',

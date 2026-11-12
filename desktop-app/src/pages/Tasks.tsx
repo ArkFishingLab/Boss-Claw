@@ -28,10 +28,12 @@ import { useRuntimeLogsStore } from '@/store/useRuntimeLogsStore';
 import { useAppStore } from '@/store/useAppStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { useScheduleStore } from '@/store/useScheduleStore';
-import { rerankPending, promoteApprovedToQueue } from '@/lib/bossclaw/priority';
+import { rerankPending } from '@/lib/bossclaw/priority';
 import { pendingStatusMeta } from '@/lib/bossclaw/taskState';
 import { jobCardStatus, scoreChip, JOB_ACTION_TIPS } from '@/lib/bossclaw/statusMeta';
 import PlatformChip from '@/components/PlatformChip';
+import { useJobApproval, useDeliveryStart } from '@/components/job-review/JobApproval';
+import { MatchAnalysisButton, MatchAnalysisProgress, MatchAnalysisInfo } from '@/components/job-review/MatchAnalysisControls';
 import { cleanTitle, cleanSalary } from '@/lib/bossclaw/jobDisplay';
 import { detectWorkSchedule } from '@/lib/bossclaw/workSchedule';
 import { fitLevelLabel } from '@/lib/bossclaw/fitLevel';
@@ -122,6 +124,8 @@ function renderFitLevelTag(level?: FitLevel) {
 }
 
 export default function Tasks() {
+  const confirmApproval = useJobApproval();
+  const confirmDeliveryStart = useDeliveryStart();
   const pending = useDataStore((s) => s.pending);
   const taskRuns = useDataStore((s) => s.taskRuns);
   const profile = useDataStore((s) => s.profile);
@@ -134,7 +138,6 @@ export default function Tasks() {
   const addLog = useRuntimeLogsStore((s) => s.addLog);
   const recomputeStats = useDataStore((s) => s.recomputeStats);
   const setRoute = useAppStore((s) => s.setRoute);
-  const setAutoAssist = useAppStore((s) => s.setAutoAssist);
   // 平台配置（含优先级）订阅：平台顺序变化时任务列表随设置实时重排
   const config = useSettingsStore((s) => s.config);
   const [filter, setFilter] = useState<'all' | PendingStatus>('all');
@@ -183,7 +186,7 @@ export default function Tasks() {
       return;
     }
     updatePending(id, { status: 'pending', retryCount: (cur?.retryCount || 0) + 1, error: '' });
-    addLog('info', '已重置岗位，可重新分析/投递');
+    addLog('info', '已恢复待确认；更新评分请点击「重新分析匹配度」');
     recomputeStats();
   };
   const onIgnore = (id: string) => {
@@ -196,10 +199,7 @@ export default function Tasks() {
     if (cur && isTerminalForActions(cur.status)) { message.warning('该岗位已投递或正在投递，不能跳过'); return; }
     updatePending(id, { status: 'skipped' }); recomputeStats();
   };
-  const onApprove = (id: string) => {
-    const next = rerankPending(pending.map((p) => p.id === id ? { ...p, status: 'approved' as const, approvedAt: p.approvedAt || Date.now() } : p), useSettingsStore.getState().config);
-    setPending(next); message.success('已确认岗位，等待「一键投递」'); recomputeStats();
-  };
+  const onApprove = (id: string) => confirmApproval([id]);
   const onRevert = (id: string) => {
     const next = rerankPending(pending.map((p) => p.id === id ? { ...p, status: 'pending' as const } : p), useSettingsStore.getState().config);
     setPending(next);
@@ -268,20 +268,10 @@ export default function Tasks() {
       setRoute('workbench');
       return;
     }
-    // 投递任务：提升「待投递」岗位进投递队列并启动引擎（与首页「开始投递」同一入口）
-    const { next, count } = promoteApprovedToQueue(useDataStore.getState().pending, config);
-    if (count) setPending(next);
-    updateTaskRun(t.id, {
-      status: 'running',
-      stageLabel: count ? `投递中（队列 ${count} 个岗位）` : '等待岗位入库',
-      error: '',
-      attempts: (t.attempts || 0) + 1,
-      updatedAt: Date.now(),
+    confirmDeliveryStart(() => {
+      updateTaskRun(t.id, { status: 'running', stageLabel: '已确认开始投递', error: '', attempts: (t.attempts || 0) + 1, updatedAt: Date.now() });
+      setRoute('workbench');
     });
-    if (!useAppStore.getState().autoAssist) setAutoAssist(true);
-    addLog('info', `已启动投递引擎（待投递 ${count} 个岗位）`);
-    message.success(count ? `已开始投递（${count} 个岗位）` : '已启动投递引擎，等待岗位入库');
-    setRoute('workbench');
   };
 
   const onDeleteTask = (t: TaskRun) => {
@@ -400,10 +390,12 @@ export default function Tasks() {
         )}
       </Card>
 
+      <MatchAnalysisProgress />
       {/* 岗位筛选工具栏 */}
       <Card size="small" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-          <Space size={12}>
+          <Space size={12} wrap>
+            <MatchAnalysisButton />
             <FilterOutlined style={{ color: 'var(--brand)' }} />
             <Segmented
               value={filter}
@@ -697,7 +689,8 @@ export default function Tasks() {
 
               
 
-              {p.error && <div className="job-error">⚠ {p.error}</div>}
+              <MatchAnalysisInfo item={p} />
+                    {p.error && <div className="job-error">⚠ {p.error}</div>}
 
               {/* 操作按钮栏 */}
               <div className="job-actions job-actions--tasks">
@@ -707,6 +700,7 @@ export default function Tasks() {
                       查看详情
                     </Button>
                   </Tooltip>
+                  {p.status === 'pending' && <MatchAnalysisButton id={p.id} />}
                   <Tooltip title={JOB_ACTION_TIPS.retry}>
                     <Button size="small" className="task-ghost-btn" icon={<ReloadOutlined />} onClick={() => onRetry(p.id)} disabled={isTerminalForActions(p.status)}>
                       重试
@@ -745,7 +739,7 @@ export default function Tasks() {
                 <div className="task-actions-right">
                   {p.status === 'pending' ? (
                     <Button size="small" type="primary" className="task-approve-btn" icon={<CheckCircleFilled />} onClick={() => onApprove(p.id)}>
-                      批准投递
+                      确认沟通
                     </Button>
                   ) : p.status === 'approved' ? (
                     <Space size={8}>
@@ -766,12 +760,10 @@ export default function Tasks() {
                     </span>
                   ) : p.status === 'failed' ? (
                     <Button size="small" danger icon={<ReloadOutlined />} onClick={() => onRetry(p.id)}>
-                      重试投递
+                      恢复待确认
                     </Button>
                   ) : (
-                    <Button size="small" type="primary" className="task-approve-btn" icon={<CheckCircleFilled />} onClick={() => onApprove(p.id)}>
-                      批准投递
-                    </Button>
+                    <span className="task-status-hint">恢复为待确认后可重新核对</span>
                   )}
                 </div>
               </div>

@@ -22,10 +22,12 @@ import { useScheduleStore } from '@/store/useScheduleStore';
 import { notifyRiskPaused, notifyValidationPaused } from '@/lib/notify';
 import BrowserView, { WebviewApi } from '@/components/BrowserView';
 import GreetingEditor from '@/components/GreetingEditor';
+import { useJobApproval, useDeliveryStart } from '@/components/job-review/JobApproval';
+import { MatchAnalysisButton, MatchAnalysisProgress, MatchAnalysisInfo } from '@/components/job-review/MatchAnalysisControls';
 import PlatformChip from '@/components/PlatformChip';
 import { ChevronDown } from '@/components/ChevronDown';
 import { LogConsole } from '@/components/LogConsole';
-import { rerankPending, promoteApprovedToQueue } from '@/lib/bossclaw/priority';
+import { rerankPending } from '@/lib/bossclaw/priority';
 import { analyzeJob, resolveQueueMinScore } from '@/lib/bossclaw/matching';
 import { fitLevelLabel } from '@/lib/bossclaw/fitLevel';
 import { isLocationExcluded } from '@/lib/bossclaw/locationFilter';
@@ -225,26 +227,9 @@ const WF_TRAP: Array<readonly [string, RegExp]> = [
   ['就业歧视', /限男性|限女性|限35岁|已婚已育优先|未婚未育优先/],
 ];
 
-// 从简历中心招呼语中挑一条与岗位最匹配的
-function pickGreetingForJob(job: JobMeta | undefined | null, greetings: string[]): { greeting: string; index: number; score: number } {
-  if (!Array.isArray(greetings) || !greetings.length) return { greeting: '', index: -1, score: 0 };
-  const title = String(job?.title || '').toLowerCase();
-  const skills = Array.isArray(job?.skills) ? job.skills.join(' ').toLowerCase() : '';
-  const haystack = `${title} ${skills}`;
-  let bestIndex = 0;
-  let bestScore = -1;
-  for (let i = 0; i < greetings.length; i += 1) {
-    const g = String(greetings[i] || '').trim();
-    if (!g) continue;
-    const keywords = g.match(/[\u4e00-\u9fa5]{2,6}/g) || [];
-    let score = 0;
-    for (const kw of keywords) if (haystack.includes(kw)) score += 1;
-    if (score > bestScore) { bestScore = score; bestIndex = i; }
-  }
-  return { greeting: String(greetings[bestIndex] || '').trim(), index: bestIndex, score: bestScore };
-}
-
 export default function Workbench() {
+  const confirmApproval = useJobApproval();
+  const confirmDeliveryStart = useDeliveryStart();
   const profile = useDataStore((s) => s.profile);
   const pending = useDataStore((s) => s.pending);
   const addPendingItem = useDataStore((s) => s.addPendingItem);
@@ -614,20 +599,22 @@ export default function Workbench() {
       }
     }
 
-    // 快路径：该岗位已入队，且旧卡完整、本次解析也完整且字段一致 → 立即提示已存在，
-    // 跳过冗余的 AI 分析（避免重复消耗 LLM 调用与等待，也让「已存在」提醒即时可见）。
+    // 去重只决定是否新增；手动重开详情仍补全/刷新 JD，不再丢失同标题的新描述。
+    // 重评由显式按钮触发，避免重复浏览或采集静默消耗 API、覆盖用户编辑的招呼语。
     if (dup) {
-      const oldF = dup.job || {};
-      if (
-        oldF.title && oldF.company && oldF.location && oldF.salary
-        && job.title && job.company && job.location && job.salary
-        && oldF.title === job.title && oldF.company === job.company && oldF.salary === job.salary && oldF.location === job.location
-      ) {
-        message.info('该岗位已在队列中');
-        addLog('info', '该岗位已在队列中，信息一致，跳过重复加入');
+      const current = useDataStore.getState().pending.find(p => p.id === dup.id);
+      if (current) {
+        const fresh = Object.fromEntries(Object.entries(job).filter(([, v]) => v !== undefined && v !== null && v !== '' && (!Array.isArray(v) || v.length)));
+        const merged = { ...current.job, ...fresh };
+        const changed = JSON.stringify(merged) !== JSON.stringify(current.job);
+        if (changed) updatePending(current.id, {
+          job: merged,
+          ...(current.status === 'pending' ? { analysisRefreshError: '岗位资料已更新，请重新分析匹配度' } : {}),
+        });
+        message.info(changed ? '该岗位已在列表，资料已更新；可点击「重新分析匹配度」' : '该岗位已在列表；更新评分请点击「重新分析匹配度」');
         recomputeStats();
-        return;
       }
+      return;
     }
 
     // 新岗位解析无任何有效元信息（公司/地点/薪资全缺，即「待补全」态）：不入队、明确提示。
@@ -645,51 +632,6 @@ export default function Workbench() {
       const customGreetingPrompt = useDataStore.getState().greetingPrompt;
       const analysis = await analyzeJob(job, profile, useDataStore.getState().resumeText, config, config.model, customGreetingPrompt || undefined);
       const item = makePendingItem(job, analysis, analysis.greeting, runId);
-      // 同链接查重+自愈：若该岗位已入队，绝不叠卡，且一律提醒「已在队列」。
-      // 信息处置三原则：
-      //  1) 本次解析不全（提取失败/10s 超时兜底/风控码）且旧卡完整 → 保留旧卡完整信息，绝不降级成「补全」；
-      //  2) 旧卡「信息不全」（公司/地点/薪资任一缺失，即待补全态）且本次解析完整 → 用本次权威解析原地自愈补齐；
-      //  3) 新旧都完整但字段不一致 → 以本次详情页权威解析刷新（避免旧卡信息不对却永不自愈）。
-      if (dup) {
-        const old = dup.job || {};
-        const oldIncomplete = !old.title || !old.company || !old.location || !old.salary;
-        const newIncomplete = !job.title || !job.company || !job.location || !job.salary;
-        const fieldsSame = old.title === job.title && old.company === job.company && old.salary === job.salary && old.location === job.location;
-        if (newIncomplete && !oldIncomplete) {
-          // 新解析不全 + 旧卡完整：保留旧卡，仅提醒已存在（禁止把完整信息降级为补全）
-          message.info('该岗位已在队列中');
-          addLog('info', `该岗位已在队列中，保留原完整信息（本次解析信息不全，不覆盖）：${old.title || old.company || '岗位'}`);
-          recomputeStats();
-          return;
-        }
-        if (newIncomplete) {
-          // 新旧都信息不全：不覆盖，仅提醒已存在（补全仍需重新「加入任务」等解析成功）
-          message.info('该岗位已在队列中');
-          addLog('info', '该岗位已在队列中（新旧解析均信息不全），跳过重复加入');
-          recomputeStats();
-          return;
-        }
-        if (oldIncomplete) {
-          // 旧卡不全 + 本次解析完整：原地自愈补齐
-          setPending(useDataStore.getState().pending.map((p) => (p.id === dup.id ? { ...p, job, analysis, deliveryGreeting: String(analysis.greeting || p.deliveryGreeting || '').trim() } : p)));
-          message.success('该岗位已在队列中，已补齐公司/地点/薪资信息');
-          addLog('info', `已补齐同链接旧卡信息：${job.title || ''}（原：${old.title || old.company || '未知'}）`);
-          recomputeStats();
-          return;
-        }
-        if (!fieldsSame) {
-          // 新旧都完整但字段不一致：以本次详情页权威解析刷新
-          setPending(useDataStore.getState().pending.map((p) => (p.id === dup.id ? { ...p, job, analysis, deliveryGreeting: String(analysis.greeting || p.deliveryGreeting || '').trim() } : p)));
-          message.info('该岗位已在队列中，已刷新为最新信息');
-          addLog('info', `已刷新同链接旧卡为网页权威信息：${job.title || ''}（原：${old.title || old.company || '未知'}）`);
-          recomputeStats();
-          return;
-        }
-        message.info('该岗位已在队列中');
-        addLog('info', '该岗位已在队列中，信息一致，跳过重复加入');
-        recomputeStats();
-        return;
-      }
       addPendingItem(item);
       const scoreSrc = analysis.scoreSource === 'local' ? '本地' : 'AI';
       addLog(analysis.decision === 'reject' ? 'warn' : 'success', `分析完成：${job.title || ''} ${scoreSrc}评分 ${analysis.score}（${analysis.decision === 'recommend' ? '推荐' : analysis.decision === 'cautious' ? '谨慎' : '不推荐'}）`);
@@ -706,75 +648,9 @@ export default function Workbench() {
     recomputeStats();
   };
 
-  const startDelivery = () => { if (!running) setAutoAssist(true); };
 
-  // 批准即入队（approved_queue = 「投递中」）：点「批准」直接进投递队列，不再经过
-  // 「待投递」中间态、也不必再点一次「一键投递」。招呼语非空校验保持不变（无招呼语仍拒绝批准）。
-  // 引擎启动策略：仅当投递引擎已在运行时新岗位自动排队；引擎停着时不擅自启动
-  // （避免「随手批准一下」就把投递打开）。首次启动仍由用户点「开始投递」。
-  const onApprove = (id: string, greeting?: string) => {
-    const latestPending = useDataStore.getState().pending;
-    const target = latestPending.find((p) => p.id === id);
-    let finalGreeting = String(greeting ?? target?.deliveryGreeting ?? target?.analysis?.greeting ?? '').trim();
-    if (!finalGreeting) {
-      const fallback = pickGreetingForJob(target?.job, useDataStore.getState().greetings || []);
-      if (fallback.greeting) {
-        finalGreeting = fallback.greeting;
-        if (target) updatePending(target.id, { deliveryGreeting: finalGreeting });
-        addLog('info', `已从简历中心招呼语自动选用（匹配度 ${fallback.score}）`);
-      }
-    }
-    if (!finalGreeting) { message.warning('请先填写求职招呼语，再确认沟通'); return; }
-    const next = rerankPending(pending.map((p) => (p.id === id ? { ...p, deliveryGreeting: finalGreeting, status: 'approved_queue' as const, approvedAt: p.approvedAt || Date.now() } : p)), useSettingsStore.getState().config);
-    setPending(next);
-    addLog('info', '已批准并加入「投递中」队列，将按匹配分与平台优先级投递');
-    // 只在引擎已运行时续跑；同时刻可能有多个岗位被批准，runNext 内部有重入锁（runNextLock/runNextQueued）
-    if (useAppStore.getState().autoAssist) requestRunNext();
-  };
-
-  const onApproveAll = () => {
-    const waiting = pending.filter((p) => p.status === 'pending');
-    if (!waiting.length) { message.info('没有待确认的岗位'); return; }
-    // M-39：高危批量动作前置二次确认（展示将处理的数量），避免误点一次性入队
-    Modal.confirm({
-      title: '批量确认全部「待确认」岗位？',
-      content: `将把 ${waiting.length} 个岗位一次性加入「投递中」队列；其中缺少求职招呼语的岗位不会入队（仍留在「待确认」）。`,
-      okText: '确认入队',
-      cancelText: '取消',
-      onOk: () => approveAllNow(waiting),
-    });
-  };
-
-  const approveAllNow = (waiting: PendingItem[]) => {
-    // 批量确认走同一口径：直接入队。逐个校验招呼语——无招呼语者**不入队**（保持待确认），
-    // 与单个「批准」的「无招呼语则拒绝批准」一致，不做静默兜底。
-    const noGreeting: string[] = [];
-    const approvedIds = new Set(
-      waiting
-        .filter((p) => {
-          const g = String(p.deliveryGreeting || p.analysis?.greeting || '').trim();
-          if (!g) { noGreeting.push(p.job?.title || p.id); return false; }
-          return true;
-        })
-        .map((p) => p.id)
-    );
-    if (!approvedIds.size) {
-      message.warning('待确认岗位均无求职招呼语，请先补充后再批量确认');
-      addLog('warn', `批量确认未执行：${noGreeting.length} 个岗位缺少招呼语`);
-      return;
-    }
-    const next = rerankPending(
-      pending.map((p) => (approvedIds.has(p.id) ? { ...p, status: 'approved_queue' as const, approvedAt: Date.now() } : p)),
-      useSettingsStore.getState().config,
-    );
-    setPending(next);
-    addLog('success', `已批量确认 ${approvedIds.size} 个岗位，进入「投递中」队列`);
-    if (noGreeting.length) {
-      message.warning(`${noGreeting.length} 个岗位因缺少招呼语未入队，仍留在「待确认」`);
-      addLog('warn', `以下岗位缺少招呼语，未入队：${noGreeting.slice(0, 5).join('、')}${noGreeting.length > 5 ? ` 等 ${noGreeting.length} 个` : ''}`);
-    }
-    if (useAppStore.getState().autoAssist) requestRunNext();
-  };
+  const onApprove = (id: string) => confirmApproval([id]);
+  const onApproveAll = () => confirmApproval(useDataStore.getState().pending.filter(p => p.status === 'pending').map(p => p.id));
 
   const onRejectAll = () => {
     const waiting = pending.filter((p) => p.status === 'pending');
@@ -798,7 +674,7 @@ export default function Workbench() {
     const item = pending.find((p) => p.id === id);
     if (item?.riskBlocked) { message.warning('该岗位曾触发平台风控拦截（验证/封禁），禁止重试，请人工核对'); return; }
     updatePending(id, { status: 'pending', retryCount: (item?.retryCount || 0) + 1, error: '', riskBlocked: false });
-    addLog('info', '已重置该岗位，可重新分析/投递');
+    addLog('info', '已恢复待确认；更新评分请点击「重新分析匹配度」');
   };
 
   const onIgnore = (id: string) => updatePending(id, { status: 'ignored' });
@@ -873,35 +749,8 @@ export default function Workbench() {
     });
   };
 
-  // 兼容入口：现在「批准」已直接入队，正常情况下不会有 approved 残留。
-  // 保留它用于两种情况：1) 老版本数据里遗留的 approved 岗位（升级后一次性清掉）；
-  // 2) 未来若重新引入「先攒一批再统一投放」的两步用法。
-  // 「一键投递」与「开始投递」口径统一（09-16）：
-  // 批准即入队后，队列里的岗位本身就是 approved_queue，本按钮的职责是「把队列里的岗位立刻开投」。
-  // 历史 bug：启用条件只看 approved —— 已确认入队的岗位全在「投递中」下，按钮恒为灰，
-  // 用户以为坏了，只能去右侧浏览器工具栏找「开始投递」（另一个按钮、另一套条件）。
-  // 现在两者语义对齐：本按钮 = 入队 + 启动引擎（引擎已在跑则无操作可做，故禁用）。
-  const onOneClickDeliver = () => {
-    const { next, count } = promoteApprovedToQueue(pending, useSettingsStore.getState().config);
-    const queued = pending.filter((p) => p.status === 'approved_queue').length;
-    if (!count && !queued) { message.info('队列里没有待投递的岗位'); return; }
-    // M-39：一键投递会真实开启投递引擎（不可逆的外部副作用），前置二次确认并展示将处理的数量
-    Modal.confirm({
-      title: '开始「一键投递」？',
-      content: count
-        ? `将把 ${count} 个「待投递」岗位并入「投递中」队列，并开启投递引擎开始投递${queued ? `（队列中另有 ${queued} 个已入队岗位）` : ''}。`
-        : `队列中已有 ${queued} 个「投递中」岗位，将开启投递引擎开始投递。`,
-      okText: '开始投递',
-      cancelText: '取消',
-      onOk: () => {
-        if (count) setPending(next);
-        if (!running) setAutoAssist(true);
-        addLog('success', count
-          ? `已将 ${count} 个「待投递」岗位并入「投递中」队列，开始投递`
-          : `队列中已有 ${queued} 个岗位，开始投递`);
-      },
-    });
-  };
+  // 确认只保存待投递；这里才明确开启实际投递。
+  const onOneClickDeliver = () => confirmDeliveryStart();
 
   const toggleExpanded = (id: string) => {
     setExpandedIds((prev) => {
@@ -915,10 +764,9 @@ export default function Workbench() {
   const onRetryAllFailed = () => {
     const retryable = pending.filter((p) => p.status === 'failed' && !p.riskBlocked);
     if (!retryable.length) { message.info('没有可重试的失败任务'); return; }
-    setPending(pending.map((p) => (p.status === 'failed' && !p.riskBlocked ? { ...p, status: 'approved_queue' as const, retryCount: (p.retryCount || 0) + 1, error: '', riskBlocked: false, approvedAt: Date.now() } : p)));
-    addLog('info', `已重新投递 ${retryable.length} 个失败任务`);
+    setPending(pending.map((p) => (p.status === 'failed' && !p.riskBlocked ? { ...p, status: 'pending' as const, retryCount: (p.retryCount || 0) + 1, error: '', riskBlocked: false, approvedAt: Date.now() } : p)));
+    addLog('info', `已恢复 ${retryable.length} 个失败岗位为待确认，未启动投递`);
     recomputeStats();
-    startDelivery();
   };
 
   // 包 useCallback：pauseAssist 被 handleRisk / handleDelivered 等多个 useCallback 引用，
@@ -2666,7 +2514,7 @@ export default function Workbench() {
   const deliveryFailedCount = deliveryTasks.filter((t) => t.p.status === 'failed').length;
   const deliveryApprovedCount = pending.filter((p) => p.status === 'approved').length;
   // 「一键投递」可点条件 = 队列里还有可投递的岗位（「待投递」或已入队的「投递中」）。
-  // 与右侧「开始投递」口径统一，避免批准即入队后本按钮长期置灰（详见 onOneClickDeliver 注释）。
+  // 与右侧开始投递共用二次确认；确认意向仅产生待投递状态。
   const deliverableCount = pending.filter((p) => p.status === 'approved' || p.status === 'approved_queue').length;
   const collecting = visualCollecting || cfxCollecting;
 
@@ -2946,7 +2794,7 @@ export default function Workbench() {
 
           {deliveryFailedCount > 0 && (
             <div style={{ marginTop: 8 }}>
-              <Button size="small" icon={<ReloadOutlined />} onClick={onRetryAllFailed}>全部重试失败任务</Button>
+              <Button size="small" icon={<ReloadOutlined />} onClick={onRetryAllFailed}>恢复失败岗位</Button>
             </div>
           )}
 
@@ -3066,18 +2914,20 @@ export default function Workbench() {
               </span>
             </button>
             <div className="wb-filter-toolbar__right">
+              <MatchAnalysisButton />
               <Button size="small" type="primary" icon={<ThunderboltOutlined />} onClick={onOneClickDeliver} disabled={!deliverableCount || running} title={running ? '投递引擎已在运行' : '把队列里已确认的岗位立刻开始投递（与右侧「开始投递」同一引擎开关）'}>一键投递</Button>
               <Button size="small" icon={<CheckOutlined />} onClick={onApproveAll}>批量确认</Button>
               <Button size="small" onClick={onRejectAll}>全部忽略</Button>
             </div>
           </div>
         </div>
+        <MatchAnalysisProgress />
         <div className="wb-sort-hint">
           <InfoCircleOutlined className="wb-sort-hint__icon" />
           <Text type="secondary" style={{ fontSize: 11, lineHeight: 1.4 }}>
             {filter === 'sent'
               ? `共 ${sentTotal} 个已投递岗位记录；可逐条删除，也可一次清理全部。`
-              : '待确认岗位按 AI 匹配分从高到低排列；点「确认」即加入「投递中」队列，确认前可先修改求职招呼语（招呼语为空则无法确认）。'}
+              : '待确认岗位按匹配分排列；「确认沟通」经弹窗核对后仅加入待投递，实际发送需另行启动。'}
           </Text>
           {/* 批量清理入口挂在提示条右侧：只在「已投递」标签下出现，不挤占上方 3 列主操作按钮组 */}
           {filter === 'sent' && (
@@ -3196,12 +3046,14 @@ export default function Workbench() {
                         )}
                       </div>
                     )}
+                    <MatchAnalysisInfo item={p} />
                     {p.error && <div className="job-error">⚠ {p.error}</div>}
                     <div className="job-actions">
                       {isPending ? (
                         // ===== 待确认：唯一可「确认沟通」的态（无招呼语会被 onApprove 拒绝）=====
                         <>
                           <div className="job-actions-right">
+                            <MatchAnalysisButton id={p.id} />
                             <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => onApprove(p.id)}>确认沟通</Button>
                           </div>
                           <div className="job-actions-left">
@@ -3211,10 +3063,7 @@ export default function Workbench() {
                           </div>
                         </>
                       ) : p.status === 'approved_queue' || p.status === 'approved' ? (
-                        // ===== 已确认入队（投递中）/ 历史遗留待投递：只能「撤回」退回待确认 =====
-                        // 09-16：批准即入队后 approved_queue 是常态。此前该态落入下面的兜底分支，
-                        // 显示「批准 / 重试」（语义错位：已确认的岗位还让人再点一次批准，点重试则被打回待确认），
-                        // 与 pending 卡的「确认沟通」不构成对称动作 —— 现统一为「撤回」。
+                        // 已确认岗位可撤回，实际发送由单独的开始投递确认控制。
                         <>
                           <div className="job-actions-right">
                             <Button size="small" icon={<UndoOutlined />} onClick={() => onRevert(p.id)}>撤回</Button>

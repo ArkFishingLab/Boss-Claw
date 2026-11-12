@@ -1067,6 +1067,7 @@ export async function cachedCallModel(
     JSON.stringify([
       scope,
       config.provider,
+      String(config.baseUrl || '').replace(/\/+$/, ''),
       config.model,
       temperature,
       maxTokens,

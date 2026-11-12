@@ -1,0 +1,8 @@
+{
+  "profile": "product-admin",
+  "locale": "zh-CN",
+  "sourceRoots": ["src/components/job-review"],
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Toast", "CRUD", "Scrollbar"],
+  "scopeNote": "Static audit covers the new shared review components. Existing page integration is checked by typecheck, regression and isolated desktop UI tests."
+}

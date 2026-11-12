@@ -1,0 +1,10 @@
+.wb-filter-toolbar__right .match-analysis-button {
+  flex: 1 0 100%;
+}
+.job-actions:has(.match-analysis-button) {
+  flex-wrap: wrap;
+}
+.job-actions:has(.match-analysis-button) > div {
+  max-width: 100%;
+  flex-wrap: wrap;
+}

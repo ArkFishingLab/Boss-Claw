@@ -1,3 +1,4 @@
+import { useDeliveryStart } from '@/components/job-review/JobApproval';
 // BossClaw 内置浏览器封装（多标签版）：<webview> 标签栏，默认加载 BOSS 直聘。
 //
 // 相比旧版的关键修复（2026-08-16）：
@@ -1093,6 +1094,7 @@ function BrowserViewImpl({ defaultPlatform = 'boss', onNavigate, onJoinTask, onJ
   }, [loadURLInTab, bossApi, readPage, runDomDump, prefillGreeting, sendApply, uiExec]);
 
   const setAutoAssist = useAppStore((s) => s.setAutoAssist);
+  const confirmDeliveryStart = useDeliveryStart();
   const autoAssist = useAppStore((s) => s.autoAssist);
   const updateActiveUrl = useCallback((url: string) => {
     // 地址栏编辑只更新当前激活标签 URL（用户操作）
@@ -1245,7 +1247,7 @@ function BrowserViewImpl({ defaultPlatform = 'boss', onNavigate, onJoinTask, onJ
             size="small"
             type={autoAssist ? 'primary' : 'default'}
             icon={<ThunderboltOutlined />}
-            onClick={() => setAutoAssist(!autoAssist)}
+            onClick={() => autoAssist ? setAutoAssist(false) : confirmDeliveryStart()}
           >
             {autoAssist ? '暂停投递' : '开始投递'}
           </Button>

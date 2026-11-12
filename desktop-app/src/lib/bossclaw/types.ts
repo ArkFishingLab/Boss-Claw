@@ -447,6 +447,11 @@ export interface PendingItem {
   runId?: string;
   job: JobMeta;
   analysis?: JobAnalysis;
+  /** 用户主动重评的最近五次旧结果；完整队列另有本地文件备份。 */
+  analysisHistory?: { analysis: JobAnalysis; replacedAt: number }[];
+  analysisUpdatedAt?: number;
+  analysisModel?: string;
+  analysisRefreshError?: string;
   task?: unknown;
   deliveryGreeting: string;
   status: PendingStatus;

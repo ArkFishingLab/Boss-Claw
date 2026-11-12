@@ -391,9 +391,14 @@ export async function analyzeJob(
      * 用户永远看不到提示词效果。工作台/采集链路不传该参数，行为不变。
      */
     skipHardBlockShortCircuit?: boolean;
+    /** 用户主动重评：必须调用当前模型，失败不覆盖旧评分；不生成或改写招呼语。 */
+    forceRefresh?: boolean;
+    requireAI?: boolean;
+    scoreOnly?: boolean;
   }
 ): Promise<JobAnalysis> {
   if (!profile) throw new Error('请先生成职业画像');
+  if (opts?.requireAI && (!model.apiKey || !model.baseUrl || !model.model)) throw new Error('请先配置并测试 LLM 连接');
   // 打招呼语/求职信提示词来源优先级：① skill（greetings 技能，含用户自定义技能）→ ② 简历中心输入框内容 → ③ 都不满足则回退本地规则。
   // 每次调用都从磁盘重读 skills/*/SKILL.md，保证技能文档改了即时生效（不改文件即无副作用）。
   await reloadSkills();
@@ -415,7 +420,7 @@ export async function analyzeJob(
   // ⚠️ greeting 指令必须进入**主分析** system prompt：若只拼技能而当技能停用后丢弃输入框内容，
   // 「设置里关闭 greetings 技能 → 简历中心提示词生效」这条优先级就是假的（输入框内容只在字数重写时被用到）。
   // 技能停用时按优先级②注入简历中心输入框内容；②也没有时由骨架（buildAnalyzeSystemPrompt）内的精简口径兜底。
-  const greetingRule = greetingsSkill
+  const greetingRule = opts?.scoreOnly ? '\n本次只重新评估岗位匹配度，greeting 返回空字符串，不生成招呼语。' : greetingsSkill
     || (inputGreeting
       ? `\n\n【AI 技能 · 打招呼语（简历中心自定义提示词）】（由软件 skills 层注入，必须遵守）\n${inputGreeting}`
       : '');
@@ -483,7 +488,13 @@ export async function analyzeJob(
       model,
       outputTokens: 3200,
     });
-    result = await cachedCallModel(
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      { role: 'user' as const, content: `职业画像：${parts.profileJson}\n简历：${parts.resume}\n${untrustedJobSection(parts.jobJson)}${localAnchorSection}` },
+    ];
+    result = opts?.forceRefresh
+      ? await callModel(messages, model, { maxTokens: 3200, purpose: '重新分析匹配度' })
+      : await cachedCallModel(
       [
         { role: 'system', content: systemPrompt },
         {
@@ -497,7 +508,7 @@ ${untrustedJobSection(parts.jobJson)}${localAnchorSection}`,
       { maxTokens: 3200 }, // 含 reason/greeting/五维 evidence，较默认下限放宽防截断
       { scope: 'job-analysis' }
     );
-    result.greeting = await settleGreetingLength(normalizeApplicantGreeting(result, job, profile), {
+    if (!opts?.scoreOnly) result.greeting = await settleGreetingLength(normalizeApplicantGreeting(result, job, profile), {
       job,
       profile,
       resumeText,
@@ -509,6 +520,7 @@ ${untrustedJobSection(parts.jobJson)}${localAnchorSection}`,
       result.aiNote = 'AI 首次返回的 JSON 不完整，已通过自动补齐修复（内容仍来自 AI）。';
     }
   } catch (err: any) {
+    if (opts?.requireAI) throw new Error('LLM 分析失败，请检查连接、模型权限和额度后重试；旧评分已保留');
     // ---- 本地确定性兜底（AI 不可用）----
     // 复用上方已算好的 local 多维匹配（含硬约束/证据/缺口），打分口径与 AI 融合路径一致：
     // 硬约束存在 → score ≤35 / reject；否则按四档区间（不推荐 <50 / 谨慎 50-64 / 匹配 65-80 / 推荐 >80）落档。
@@ -621,7 +633,9 @@ ${untrustedJobSection(parts.jobJson)}${localAnchorSection}`,
   //    属弱证据（system 提示词自己也要求 AI 不得照抄本地技能命中与缺口），用弱证据去校正 AI 只会
   //    把正确判断往「字面巧合」上拽。现改为：AI 给 fitLevel → score 落在该档区间；AI 未给 → 按 score
   //    反推档位；AI 未给 score → 本地兜底分。本地分只在 AI 完全不可用时出场。
-  const aiScore = Number(result.score);
+  const aiScore = typeof result.score === 'number' || (typeof result.score === 'string' && result.score.trim())
+    ? Number(result.score) : NaN;
+  if (opts?.requireAI && !Number.isFinite(aiScore)) throw new Error('模型未返回有效评分，旧评分已保留');
   // 评分来源标记（UI 提示口径：AI 计算优先，AI 未参与时才标本地确定性计算）：
   // AI 返回了可用分数即视为 AI 计算；模型输出缺 score（NaN）才落到本地兜底分。
   result.scoreSource = Number.isFinite(aiScore) ? 'ai' : 'local';

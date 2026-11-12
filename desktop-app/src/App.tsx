@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from './store/useAppStore';
+import { useDataStore } from './store/useDataStore';
 import { cssVars } from './theme';
 import { useTheme } from './context/ThemeContext';
 import { bridgeStatus } from './lib/bridgeClient';
@@ -60,6 +61,13 @@ const PRELOAD_PAGES: Array<() => Promise<unknown>> = [
 ];
 
 export default function App() {
+  // 采集 worker 不跨进程恢复；重启后不能把旧采集记录继续显示成正在运行。
+  useEffect(() => {
+    const d = useDataStore.getState();
+    const interrupted = d.taskRuns.some(t => t.id.startsWith('cr_') && (t.status === 'running' || t.status === 'queued'));
+    if (interrupted) d.setTaskRuns(d.taskRuns.map(t => t.id.startsWith('cr_') && (t.status === 'running' || t.status === 'queued')
+      ? { ...t, status: 'skipped', stageLabel: '应用重启，采集已中断；可点击继续重新采集', updatedAt: Date.now() } : t));
+  }, []);
   const activeRoute = useAppStore((s) => s.activeRoute);
   // P28：从 ThemeProvider 上下文复用 Root 算好的 effective，避免 App 再各自持有一份 matchMedia 监听
   const { effective } = useTheme();
