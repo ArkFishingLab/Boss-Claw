@@ -44,7 +44,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   sendResumeImage: true,
   sendOnlineResume: false,
   // 关窗收进托盘：让定时任务 / 投递引擎在窗口隐藏后继续跑（设置页可关，关掉即关窗退出）
-  closeToTray: true,
+  closeToTray: false,
   // 系统通知：首次投递验收 / 风控暂停 / 定时任务完成时弹一条，用户不必一直盯着窗口
   systemNotify: true,
   betweenJobsSeconds: 20,

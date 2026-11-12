@@ -9,6 +9,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const os = require('node:os');
+require('../../../../scripts/boss-claw/local-paths.cjs');
 const { spawn, execFile } = require('node:child_process');
 // 本地控制桥（供外部 agent / MCP 操作运行中的应用；默认关闭，见 control-bridge.cjs 的开启条件）
 const { startControlBridge, resolveEnablement } = require('./control-bridge.cjs');
@@ -425,7 +426,7 @@ const CAMOUFOX_PORT = 18767;
 // 运行时随机生成并存于 ~/.bossclaw/camoufox-token（跨启动稳定，避免与上一会话残留的桥令牌不一致），
 // 经**环境变量**传给 Python（不再走 argv，避免出现在进程命令行里）。
 function loadOrCreateRuntimeSecret(name) {
-  const file = path.join(os.homedir(), '.bossclaw', name);
+  const file = path.join(app.getPath('home'), '.bossclaw', name);
   try {
     const existing = fs.readFileSync(file, 'utf8').trim();
     if (existing) return existing;
