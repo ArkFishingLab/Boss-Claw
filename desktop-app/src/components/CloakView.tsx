@@ -9,6 +9,7 @@
 //   2. 事件流面板美化：标题渐变卡 + Empty 空状态 + 等宽 chip 事件行。
 //   3. 自动启动引擎：刷新/前进/后退/新建标签/地址栏前往统一经 ensureCloakEngine()，
 //      引擎关闭后再点任何操作都会自动拉起，不再因为 ready=false 报「未启动」。
+import { useDeliveryStart } from '@/components/job-review/JobApproval';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Input, Tag, Tooltip, Select, Empty, Space, message, Modal } from 'antd';
 import {
@@ -295,6 +296,7 @@ export default function CloakView(props: Props) {
     }
   }, [engine.ready, tabs]);
 
+  const confirmDeliveryStart = useDeliveryStart();
   const setAutoAssist = useAppStore((s) => s.setAutoAssist);
   const autoAssist = useAppStore((s) => s.autoAssist);
 
@@ -610,7 +612,7 @@ export default function CloakView(props: Props) {
           <Button size="small" icon={<PlusCircleOutlined />} onClick={() => activeTab && onJoinTask?.({ url: activeTab.url, title: activeTab.title })}>加入任务</Button>
         </Tooltip>
         <Tooltip title={autoAssist ? '点击暂停投递引擎' : '启动投递引擎，开始投递队列中的岗位'}>
-          <Button size="small" type={autoAssist ? 'primary' : 'default'} icon={<ThunderboltOutlined />} onClick={() => setAutoAssist(!autoAssist)}>
+          <Button size="small" type={autoAssist ? 'primary' : 'default'} icon={<ThunderboltOutlined />} onClick={() => autoAssist ? setAutoAssist(false) : confirmDeliveryStart()}>
             {autoAssist ? '暂停投递' : '开始投递'}
           </Button>
         </Tooltip>

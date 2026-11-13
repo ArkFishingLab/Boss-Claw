@@ -72,6 +72,17 @@ try {
   await action('dataSetProfile',{profile:{facts:{education:['计算机硕士'],experiences:[],projects:[],skills:['Python','RAG','Agent'],certificates:[],capabilities:[]},primaryDirections:[{name:'Agent算法',confidence:.8,evidence:[]}],secondaryDirections:[],searchKeywords:['Agent'],hardConstraints:{locations:['上海'],employmentTypes:['全职'],salary:'',experience:'2年',degree:'硕士'},excludeDirections:[],summary:'[QA] 检索与记忆开发'}});
   await action('dataPendingAdd',{item:{id:'qa-a',job:{title:'[QA] Agent算法工程师',company:'隔离测试公司',salary:'20-30K',location:'上海',description:'负责RAG和Agent记忆，Python/PyTorch',url:'https://example.invalid/qa-a'},status:'pending',deliveryGreeting:old.greeting,analysis:old,createdAt:1}});
   await reset(); await action('navigate',{route:'workbench'});
+  await page.setViewportSize({width:1000,height:760});
+  const actions = surface().locator('.job-actions').filter({has:page.locator('.match-analysis-button')}).first();
+  await actions.waitFor();
+  const layout = await actions.evaluate(el => Array.from(el.querySelectorAll('button')).map(b => ({
+    text:b.textContent.trim(), y:b.getBoundingClientRect().y, right:b.getBoundingClientRect().right,
+    size:getComputedStyle(b).fontSize, parentRight:el.getBoundingClientRect().right
+  })));
+  assert.equal(layout.length,5); assert.equal(new Set(layout.map(b=>Math.round(b.y))).size,1);
+  assert.equal(layout[0].text,'分析'); assert(layout.every(b=>b.size==='12px' && b.right<=b.parentRight+1));
+  checks.push('Five compact actions fit one row at desktop minimum width');
+  await page.screenshot({path:resolve(artifactDir,'compact-actions.png')});
   await surface().getByRole('button',{name:/确认沟通$/}).first().evaluate(el => el.click());
   await page.getByRole('dialog').getByRole('button',{name:/取\s*消/}).evaluate(el => el.click());
   await page.getByRole('dialog').waitFor({state:'hidden'});
@@ -84,6 +95,25 @@ try {
   await page.getByRole('dialog').waitFor({state:'hidden'});
   assert.equal((await getItems())[0].status,'approved');
   assert.equal((await action('state')).next.app.autoAssist,false); checks.push('Approval only enters approved, never starts engine');
+  await action('navigate',{route:'autochat'});
+  await surface().locator('.autochat-queue-scroll').getByRole('button',{name:/沟\s*通$/}).first().evaluate(el=>el.click());
+  assert((await page.getByRole('dialog').innerText()).includes('发送这条沟通消息'));
+  await page.getByRole('dialog').getByRole('button',{name:/取\s*消/}).evaluate(el=>el.click());
+  await page.getByRole('dialog').waitFor({state:'hidden'});
+  assert.equal((await getItems())[0].status,'approved');
+  checks.push('Single AutoChat send requires confirmation; cancel keeps queue unchanged');
+  for (const command of ['setAutoAssist','autochatStart','autochatStep','deliverySendNow','pendingPromote']) {
+    assert.equal((await action(command, {enabled:true,id:'qa-a'})).applied,false);
+  }
+  checks.push('Remote control cannot bypass send confirmation');
+  await action('navigate',{route:'settings'});
+  await surface().getByRole('radio',{name:'全自动投递',exact:true}).evaluate(el=>el.click());
+  assert((await page.getByRole('dialog').innerText()).includes('开启全自动投递模式'));
+  await page.getByRole('dialog').getByRole('button',{name:/取\s*消/}).evaluate(el=>el.click());
+  await page.getByRole('dialog').waitFor({state:'hidden'});
+  assert.equal((await action('state')).next.settings.config.executionMode,'review');
+  checks.push('Enabling automatic mode requires confirmation; cancel retains manual review');
+  await action('navigate',{route:'workbench'});
   await surface().getByRole('button',{name:/一键投递$/}).evaluate(el=>el.click());
   assert((await page.getByRole('dialog').innerText()).includes('开始实际投递'));
   await page.getByRole('dialog').getByRole('button',{name:/取\s*消/}).evaluate(el=>el.click());

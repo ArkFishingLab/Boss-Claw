@@ -9,6 +9,7 @@
  * - 数据管理（data：备份/清空本地数据等）
  * - 弹窗：新建自定义技能（createSkillOpen，触发入口在 AI / LLM 配置 tab）
  */
+import { useCommunicationConfirmation } from '@/components/job-review/JobApproval';
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Alert,
@@ -178,6 +179,7 @@ function notifyNoKeywordCollectEnabled() {
 }
 
 export default function Settings({ isVisible = true }: { isVisible?: boolean }) {
+  const confirmCommunication = useCommunicationConfirmation();
   // P5-08：设置页在 App「首进常驻」架构下切走不卸载，5s 轮询若不停会在后台持续打 IPC；
   // 用 ref 缓存可见性，interval 不必随 prop 重建，隐藏在后台时静默跳过轮询。
   const visibleRef = useRef(isVisible);
@@ -873,7 +875,9 @@ export default function Settings({ isVisible = true }: { isVisible?: boolean }) 
               className="setting-segmented"
               size="large"
               value={config.executionMode === 'auto' ? 'auto' : 'review'}
-              onChange={(v) => setConfig({ executionMode: v as 'auto' | 'review' })}
+              onChange={(v) => v === 'auto'
+                ? confirmCommunication('开启全自动投递模式？', '此模式允许启动后的投递流程自动继续。实际发送仍需另行确认启动；应用重启后恢复人工确认模式。', () => setConfig({ executionMode: 'auto' }))
+                : setConfig({ executionMode: 'review' })}
               options={[
                 { label: '人工确认 (半自动)', value: 'review' },
                 { label: '全自动投递', value: 'auto' },
@@ -881,7 +885,7 @@ export default function Settings({ isVisible = true }: { isVisible?: boolean }) 
             />
             <Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0, fontSize: 13 }}>
               {config.executionMode === 'auto'
-                ? '全自动投递：岗位由 AI 评估符合要求后自动确认，直接进入「待投递」并按顺序发送。'
+                ? '全自动模式：启动时仍需确认投递队列；采集岗位仍需人工确认。队列为空时可自动采集，应用重启后恢复人工确认模式。'
                 : '人工确认：由 AI 筛选评分后，岗位停在「待确认」，需在工作台点「确认」或「批量确认」后才进入「待投递」。'}
             </Paragraph>
           </div>

@@ -8,3 +8,19 @@
   max-width: 100%;
   flex-wrap: wrap;
 }
+.workbench-host .job-actions:has(.match-analysis-button) {
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: 4px;
+}
+.workbench-host .job-actions:has(.match-analysis-button) > div {
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  gap: 4px;
+}
+.workbench-host .job-actions:has(.match-analysis-button) .ant-btn {
+  height: 26px;
+  padding-inline: 6px;
+  font-size: 12px;
+  gap: 4px;
+}

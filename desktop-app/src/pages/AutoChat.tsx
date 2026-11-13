@@ -47,6 +47,7 @@ import type { PendingItem, ImageResume } from '@/lib/bossclaw/types';
 import { EmptyState } from '@/components/feedback';
 import { ChatLogPanel } from '@/components/ChatLogPanel';
 import PlatformChip from '@/components/PlatformChip';
+import { useCommunicationConfirmation } from '@/components/job-review/JobApproval';
 
 const { Text, Paragraph } = Typography;
 
@@ -67,6 +68,7 @@ const STATUS_TAG: Record<string, { color: string; label: string }> = {
 };
 
 export default function AutoChat() {
+  const confirmCommunication = useCommunicationConfirmation();
   // ===== Store 订阅（按字段选择并使用 useShallow 避免全量重渲染） =====
   const pending = useDataStore(useShallow((s) => s.pending));
   const updatePending = useDataStore((s) => s.updatePending);
@@ -83,7 +85,7 @@ export default function AutoChat() {
   const config = useSettingsStore(useShallow((s) => s.config));
   const setConfig = useSettingsStore((s) => s.setConfig);
 
-  // ===== 自动沟通后台引擎（全局持久：切页仍继续运行，工作台新批准岗位自动加入）=====
+  // ===== 自动沟通后台引擎（切页仍继续运行，仅处理本次确认的队列）=====
   const chatRunning = useAutoChatStore((s) => s.chatRunning);
   const activeChatId = useAutoChatStore((s) => s.activeChatId);
   const watchRunning = useAutoChatStore((s) => s.watchRunning);
@@ -281,9 +283,16 @@ export default function AutoChat() {
         return;
       }
     }
-    // 启动后台持久沟通：切到工作台仍继续运行，新批准的岗位会自动加入
-    start();
-  }, [profile, config, batchQueue, start, cfxPlatformLogin, refreshPlatformStatus]);
+    const snapshot = JSON.stringify(batchQueue);
+    confirmCommunication(`开始批量沟通（${batchQueue.length} 个岗位）？`,
+      '将向这批已确认岗位发送招呼语及已启用的附件。运行期间新加入的岗位不会自动发送，须另行确认启动。', () => {
+        const latest = rerankPending(useDataStore.getState().pending, config).filter(
+          p => (p.status === 'approved' || p.status === 'opened') && platformEnabled(config, String(p.job?.platform || 'boss') as JobPlatform)
+        );
+        if (JSON.stringify(latest) !== snapshot) { message.warning('队列已变化，请重新核对后启动'); return; }
+        start();
+      });
+  }, [profile, config, batchQueue, start, cfxPlatformLogin, refreshPlatformStatus, confirmCommunication]);
 
   // ===== AI 跟聊监听：常驻巡检已投递的 BOSS 会话，HR 回消息即带上下文自动回复 =====
   const handleToggleWatch = useCallback(async (on: boolean) => {
@@ -302,8 +311,8 @@ export default function AutoChat() {
       message.warning('BOSS 未登录，请先在上方扫码登录后再开启跟聊监听');
       return;
     }
-    setWatch(true);
-  }, [profile, config, setWatch]);
+    confirmCommunication('开启 AI 自动跟聊？', '开启后会巡检已沟通会话，自动生成并向招聘方发送回复。关闭开关可停止；应用重启后保持关闭。', () => setWatch(true));
+  }, [profile, config, setWatch, confirmCommunication]);
 
   // 活跃时段折算小时数（**仅用于界面提示**）。真正的时段判定权威仍是 activityWindow.ts；
   // 日抖动只平移边界、不改变跨度，故此处直接用起止小时做差，跨午夜（end <= start）时 +24 归一。
@@ -538,7 +547,12 @@ export default function AutoChat() {
                                 icon={<MessageOutlined />}
                                 loading={isActive}
                                 disabled={chatRunning && !isActive}
-                                onClick={() => chatOne(p)}
+                                onClick={() => confirmCommunication('发送这条沟通消息？',
+                                  `${p.job.company} · ${p.job.title}\n${p.deliveryGreeting || p.analysis?.greeting || ''}`, () => {
+                                    const latest = useDataStore.getState().pending.find(item => item.id === p.id);
+                                    if (!latest || JSON.stringify(latest) !== JSON.stringify(p)) { message.warning('岗位已变化，请重新核对'); return; }
+                                    chatOne(latest);
+                                  })}
                                 style={{ borderRadius: 6 }}
                               >
                                 沟通

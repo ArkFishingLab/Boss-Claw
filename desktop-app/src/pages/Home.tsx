@@ -40,7 +40,6 @@ import { useRuntimeLogsStore } from '@/store/useRuntimeLogsStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { profileHasCore } from '@/lib/bossclaw/profile';
 import { selectedDirectionItems } from '@/lib/bossclaw/directions';
-import { rerankPending, promoteApprovedToQueue } from '@/lib/bossclaw/priority';
 import { createTasks } from '@/lib/bossclaw/tasks';
 import { MetricCard } from '@/components/MetricCard';
 import { electronApi } from '@/lib/electronApi';
@@ -48,6 +47,7 @@ import { effectiveDailyCap, enabledSentCount } from '@/lib/bossclaw/safety';
 import { PLATFORM_IDS, platformLabel, type JobPlatform } from '@/lib/bossclaw/platforms';
 import type { PendingItem } from '@/lib/bossclaw/types';
 import MarkdownView from '@/components/MarkdownView';
+import { useJobApproval, useDeliveryStart } from '@/components/job-review/JobApproval';
 
 const { Paragraph, Text } = Typography;
 
@@ -219,12 +219,9 @@ export default function Home() {
   const currentStep = stepStates.findIndex((s) => s !== 'done');
 
   /** 真正启动投递引擎（通过前置校验之后） */
-  const startAssistNow = () => {
-    setRoute('workbench');
-    const { next, count } = promoteApprovedToQueue(pending, useSettingsStore.getState().config);
-    if (count) setPending(next);
-    if (!useAppStore.getState().autoAssist) setAutoAssist(true);
-  };
+  const confirmApproval = useJobApproval();
+  const confirmDeliveryStart = useDeliveryStart();
+  const startAssistNow = () => confirmDeliveryStart(() => setRoute('workbench'));
 
   const handleStartAssist = () => {
     // 登录门禁按「待投递岗位所在平台」判定（与工作台口径一致，platformLogins 为 cookie 权威探测）：
@@ -285,18 +282,9 @@ export default function Home() {
     setRoute('workbench');
   };
 
-  const handleApproveAll = () => {
-    const waiting = pending.filter((p) => p.status === 'pending');
-    if (waiting.length === 0) { message.info('没有待确认的岗位'); return; }
-    const next = rerankPending(
-      pending.map((p) => (p.status === 'pending' ? { ...p, status: 'approved' as const, approvedAt: p.approvedAt || Date.now() } : p)),
-      useSettingsStore.getState().config
-    );
-    setPending(next);
-    addLog('success', `已确认 ${waiting.length} 个岗位，等待「开始投递」`);
-    message.success(`已批准 ${waiting.length} 个岗位（待投递）`);
-    setRoute('workbench');
-  };
+  const handleApproveAll = () => confirmApproval(
+    useDataStore.getState().pending.filter(p => p.status === 'pending').map(p => p.id)
+  );
 
   const handleRejectAll = () => {
     const waiting = pending.filter((p) => p.status === 'pending');

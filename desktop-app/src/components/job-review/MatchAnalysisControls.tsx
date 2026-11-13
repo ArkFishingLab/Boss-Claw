@@ -27,8 +27,8 @@ export function MatchAnalysisButton({ id }: { id?: string }) {
       afterClose: () => { refreshDialogOpen = false; },
     });
   };
-  return <Button className="match-analysis-button" size="small" icon={<ReloadOutlined />} onClick={onClick} disabled={running || !count} loading={running && !!id && activeId === id}>
-    {id ? '重新分析匹配度' : `重新分析匹配度（${count}）`}
+  return <Button className="match-analysis-button" size="small" title={id ? '重新分析匹配度' : undefined} aria-label={id ? '重新分析匹配度' : undefined} icon={<ReloadOutlined />} onClick={onClick} disabled={running || !count} loading={running && !!id && activeId === id}>
+    {id ? '分析' : `重新分析匹配度（${count}）`}
   </Button>;
 }
 

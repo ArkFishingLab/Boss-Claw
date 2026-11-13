@@ -3054,7 +3054,7 @@ export default function Workbench() {
                         <>
                           <div className="job-actions-right">
                             <MatchAnalysisButton id={p.id} />
-                            <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => onApprove(p.id)}>确认沟通</Button>
+                            <Button size="small" type="primary" icon={<CheckOutlined />} title="仅加入待投递队列，不会发送消息" onClick={() => onApprove(p.id)}>确认沟通</Button>
                           </div>
                           <div className="job-actions-left">
                             <Tooltip title={JOB_ACTION_TIPS.openInApp}><Button size="small" icon={<EyeOutlined />} onClick={() => p.job?.url && webviewApi.current?.openInNewTab(p.job.url, p.job?.title)}>打开</Button></Tooltip>

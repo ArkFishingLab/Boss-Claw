@@ -3,7 +3,7 @@
 // 原 useAutoChatEngine 是组件钩子：切页后组件卸载，批量任务随之丢失。
 // 这里把运行器提升为模块级单例（Zustand store），使「开始批量沟通」后即使切到工作台，
 // 任务仍在后台继续运行；同时运行器每个周期重新读取 pending，
-// 工作台新批准的岗位会自动进入当前批次的自动沟通队列（无需重新点「开始」）。
+// 每次仅消费启动时确认的队列，新批准岗位留待下次确认启动。
 //
 // 安全不变量与旧实现一致：冷却/每日上限/限速/首条验收/风控交人工均保留；
 // 「分批」改由定时任务显式表达（每次触发可带 scope：目标平台 + 单轮上限）。
@@ -51,8 +51,6 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *  - pending（待确认）未批准，本后台不自动投递。
  */
 const BATCH_ELIGIBLE = ['approved', 'opened'];
-/** 队列空闲时轮询工作台新批准岗位的间隔 */
-const IDLE_POLL_MS = 6000;
 
 // ---- 模块级运行态（不受组件卸载影响）----
 // P2-04：原 5 个独立 let（runToken / busy / ownerRun / processedIds / cancelRequested）承载运行态，
@@ -817,7 +815,7 @@ interface AutoChatState {
   /** 跟聊监听当前正在巡检的岗位 id（UI 高亮用） */
   watchActiveId: string | null;
   progress: AutoChatProgress;
-  /** 启动后台批量沟通：持续处理当前队列，并自动接收工作台新批准岗位 */
+  /** 启动后台批量沟通：仅处理启动时确认的队列 */
   start: (scope?: AutoChatScope) => void;
   /** 仅处理单个岗位（不与批量并发） */
   chatOne: (item: PendingItem) => void;
@@ -836,9 +834,12 @@ export const useAutoChatStore = create<AutoChatState>((set) => ({
 
   start: (scope?: AutoChatScope) => {
     if (currentRun || useAutoChatStore.getState().chatRunning) return;
+    const cfg = useSettingsStore.getState().config;
+    const confirmedIds = new Set(useDataStore.getState().pending.filter(p =>
+      BATCH_ELIGIBLE.includes(p.status) && platformEnabled(cfg, String(p.job?.platform || 'boss') as JobPlatform)
+    ).map(p => p.id));
     const run: EngineRun = { token: ++nextRunToken, processedIds: new Set<string>(), cancelRequested: false };
     currentRun = run; // 建立互斥（busy）：单一真值，null = 空闲
-    const cfg = useSettingsStore.getState().config;
     // 预算同步到共享 pacer（内部夹到 SAFETY_LIMITS.MAX_ACTIONS_PER_MINUTE 硬上限；见审查 #22/#73）。
     // 注意：批次休息计数**不再随本轮重置** —— 它是跨引擎的账号级累计，只在真正休息完成后归零，
     // 否则任一引擎起跑都会把另一引擎的累计清零（原「每轮重置」在双引擎并行下必然互相踩）。
@@ -854,13 +855,12 @@ export const useAutoChatStore = create<AutoChatState>((set) => ({
     useRuntimeLogsStore.getState().addChatLog({
       level: 'info',
       stage: 'system',
-      msg: `🚀 批量自动沟通已在后台启动${scopeText}：持续处理当前队列，并会在工作台新批准岗位时自动加入继续沟通（切到工作台仍会继续运行）。`,
+      msg: `🚀 批量自动沟通已在后台启动${scopeText}：仅处理启动时确认的队列；新入队岗位须另行启动（切页仍继续运行）。`,
     });
 
     void (async () => {
       let sentCount = 0;
       let stopAll = false;
-      let greeted = false;
       try {
         while (currentRun === run) {
           const data = useDataStore.getState();
@@ -874,7 +874,7 @@ export const useAutoChatStore = create<AutoChatState>((set) => ({
             platformPriority(loopCfg, String(p.job?.platform || 'boss') as 'boss' | 'liepin' | 'zhaopin' | 'job51');
           const allEligible = rerankPending(data.pending, loopCfg).filter(
             (p: PendingItem) =>
-              BATCH_ELIGIBLE.includes(p.status) &&
+              confirmedIds.has(p.id) && BATCH_ELIGIBLE.includes(p.status) &&
               // HR 已明确拒绝（AI 跟聊判定）的会话不再投递
               !p.hrRejectedAt &&
               !run.processedIds.has(p.id) &&
@@ -885,20 +885,8 @@ export const useAutoChatStore = create<AutoChatState>((set) => ({
                 scope.platforms.includes((p.job?.platform || 'boss') as JobPlatform))
           );
 
-          // 队列暂空 → 后台轮询，等待工作台新批准岗位
-          if (allEligible.length === 0) {
-            if (!greeted) {
-              greeted = true;
-              useRuntimeLogsStore.getState().addChatLog({
-                level: 'info',
-                stage: 'system',
-                msg: '👀 当前后台队列已处理完。任务保持运行，工作台新批准的岗位会自动进入沟通队列。',
-              });
-            }
-            set({ progress: { index: run.processedIds.size, total: run.processedIds.size } });
-            await sleep(IDLE_POLL_MS);
-            continue;
-          }
+          // Complete this confirmed batch; never consume jobs approved while it is running.
+          if (allEligible.length === 0) break;
           // 平台硬串行：仅取最优先平台组；该组清空后（switch）下一轮自然轮到次优平台。
           const topPfKey = Math.min(...allEligible.map(pfKey));
           const eligible = allEligible.filter((p) => pfKey(p) === topPfKey);
