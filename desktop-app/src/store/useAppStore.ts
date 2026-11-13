@@ -200,9 +200,11 @@ export const useAppStore = create<AppState>()(
       // bridgeStatus / bossLoggedIn / platformLogins / currentAction 是运行时探测结果，不能持久化：
       // 否则上次「已连接 / 正在投递」会被带到下次启动，导致未运行时仍显示旧状态
       partialize: (s) => {
-        const { bridgeStatus: _bridge, bossLoggedIn: _login, platformLogins: _pl, currentAction: _action, browserLoginRequest: _blr, pendingMockInterview: _pmi, ...rest } = s;
+        const { autoAssist: _auto, engineStatus: _engine, bridgeStatus: _bridge, bossLoggedIn: _login, platformLogins: _pl, currentAction: _action, browserLoginRequest: _blr, pendingMockInterview: _pmi, ...rest } = s;
         return rest;
       },
+      // Ignore legacy persisted running flags too: every launch requires a new user confirmation.
+      merge: (persisted, current) => ({ ...current, ...(persisted as Partial<AppState>), autoAssist: false, engineStatus: 'stopped' }),
     }
   )
 );

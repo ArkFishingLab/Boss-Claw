@@ -85,3 +85,18 @@ export function useDeliveryStart() {
     });
   };
 }
+
+// All automatic send switches share cancellation-first confirmation.
+export function useCommunicationConfirmation() {
+  const { modal } = App.useApp();
+  return (title: string, content: string, onConfirm: () => void) => {
+    if (dialogOpen) return;
+    dialogOpen = true;
+    modal.confirm({
+      title, content, okText: '确认继续', cancelText: '取消',
+      autoFocusButton: 'cancel', okButtonProps: { danger: true },
+      onOk: onConfirm,
+      afterClose: () => { dialogOpen = false; },
+    });
+  };
+}

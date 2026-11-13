@@ -17,7 +17,7 @@ import { writeLocalBackup, restoreFromLocalBackup } from '@/lib/localBackup';
 import { electronApi } from '@/lib/electronApi';
 import { PLATFORM_IDS, platformEnabled, type JobPlatform } from '@/lib/bossclaw/platforms';
 import { isWhitelistedUrl, whitelistHostOf } from '@/lib/bossclaw/browserWhitelist';
-import { SAFETY_LIMITS, isLockedOut, effectiveDailyCap, enabledSentCount, cooldownRemaining } from '@/lib/bossclaw/safety';
+import { SAFETY_LIMITS } from '@/lib/bossclaw/safety';
 import { analyzeJob } from '@/lib/bossclaw/matching';
 import { tailorForJob } from '@/lib/bossclaw/jobAssistant';
 import { buildProfile } from '@/lib/bossclaw/profile';
@@ -33,9 +33,8 @@ import {
   cancelAgentAnswer,
   agentAnswerStats,
 } from '@/lib/bossclaw/agentAnswer';
-import { rerankPending, promoteApprovedToQueue } from '@/lib/bossclaw/priority';
+import { rerankPending } from '@/lib/bossclaw/priority';
 import { TASK_STAGE_META, TERMINAL_RUN_STATUSES, taskStageMetaFor } from '@/lib/bossclaw/taskState';
-import { isDeliveryClaimed } from '@/lib/bossclaw/deliveryLock';
 import { getBrowser } from '@/lib/browserRegistry';
 import {
   queryInteractive,
@@ -209,8 +208,9 @@ const handlers: Record<string, Handler> = {
     return { applied: true, message: `侧栏${collapsed ? '已收起' : '已展开'}`, previous: prev, next: Boolean(collapsed) };
   },
 
-  /** 等价于标题栏「投递引擎」开关；不会自行发起任何投递 */
+  /** Remote control may stop the engine; starting requires the in-app confirmation dialog. */
   setAutoAssist: ({ enabled }) => {
+    if (enabled) return { applied: false, message: '请在应用内核对队列并通过确认弹窗启动投递' };
     const prev = useAppStore.getState().autoAssist;
     useAppStore.getState().setAutoAssist(Boolean(enabled));
     return {
@@ -529,27 +529,7 @@ const handlers: Record<string, Handler> = {
     const out = await b.prefillGreeting(g);
     return { applied: out.ok, message: out.ok ? '已在沟通框填入草稿（未发送，请用户核对后发送）' : `预填失败：${out.reason || '未知原因'}`, next: out };
   },
-  deliverySendNow: async ({ greeting }) => {
-    // 安全护栏：仅当用户已开启「全自动」（executionMode==='auto'）时，agent 才能触发自动投递
-    const mode = useSettingsStore.getState().config.executionMode;
-    if (mode !== 'auto') {
-      return { applied: false, accepted: false, sent: false, message: '全自动未开启（executionMode 为 review），自动投递已被拒绝；请先在应用内开启全自动，或用 delivery.draft 草拟后由用户发送' };
-    }
-    const b = getBrowser();
-    if (!b) return { applied: false, accepted: false, sent: false, message: '浏览器控制不可用（需 webview 引擎运行）' };
-    try {
-      const out = await b.sendApply(greeting !== undefined ? { greeting: String(greeting) } : {});
-      return {
-        applied: out.ok,
-        accepted: out.accepted,
-        sent: out.sent,
-        message: out.ok ? (out.hint || '已派发自动投递请求；发送结果尚未确认') : (out.reason || '触发失败'),
-        next: out,
-      };
-    } catch (e) {
-      return { applied: false, accepted: false, sent: false, message: `投递请求未能派发：${(e as Error)?.message || e}` };
-    }
-  },
+  deliverySendNow: () => ({ applied: false, accepted: false, sent: false, message: '请在应用内核对消息并通过确认弹窗发送；控制桥仅支持草稿预填' }),
 
   // ===== A. 通用 UI 接管（scope: app → document；webview → browser.uiExec）=====
   uiSnapshot: async ({ scope, selector, limit }) => {
@@ -660,63 +640,14 @@ const handlers: Record<string, Handler> = {
   },
 
   // ===== B. 自动沟通引擎接管 =====
-  autochatStart: ({ platforms, maxCount }) => {
-    const auto = useAutoChatStore.getState();
-    if (auto.chatRunning) return { applied: false, message: '后台沟通已在运行' };
-    const cfg = useSettingsStore.getState().config;
-    // 安全护栏（审查 C-1）：自动沟通经 camoufoxChat 真实发送招呼语，与 deliverySendNow 同等副作用，
-    // 必须同样以「用户已开启全自动」为前置条件；否则 agent 可改调本动作实现真实批量发送，
-    // 使 deliverySendNow 的 executionMode 护栏被自证绕过。executionMode 只能由用户在设置页切换。
-    if (cfg.executionMode !== 'auto') {
-      return { applied: false, message: '全自动未开启（executionMode 为 review），自动沟通（真实发送招呼语）已被拒绝；请由用户在应用内开启全自动，或使用 deliveryDraft 草拟后由用户发送' };
-    }
-    if (isLockedOut(cfg)) return { applied: false, message: `冷却期内不可启动（剩余约 ${Math.ceil(cooldownRemaining(cfg) / 60000)} 分钟）` };
-    auto.start({
-      platforms: Array.isArray(platforms) ? (platforms.map(String) as JobPlatform[]) : undefined,
-      maxCount: maxCount != null ? Number(maxCount) : undefined,
-    });
-    return { applied: true, message: '后台自动沟通已启动（持续处理队列，切页仍运行）', next: { chatRunning: true } };
-  },
+  autochatStart: () => ({ applied: false, message: '请在自动沟通页面核对队列并通过确认弹窗启动' }),
 
   autochatStop: () => {
     useAutoChatStore.getState().stop();
     return { applied: true, message: '已停止后台沟通', next: { chatRunning: false } };
   },
 
-  autochatStep: ({ id }) => {
-    const auto = useAutoChatStore.getState();
-    if (auto.chatRunning) return { applied: false, message: '后台沟通运行中，请先 autochatStop 再单步' };
-    const cfg = useSettingsStore.getState().config;
-    const data = useDataStore.getState();
-    // 安全护栏（审查 C-1）：单步沟通同样会真实发送招呼语，与 autochatStart 同源，须校验全自动。
-    if (cfg.executionMode !== 'auto') {
-      return { applied: false, message: '全自动未开启（executionMode 为 review），单步沟通（真实发送招呼语）已被拒绝；请由用户在应用内开启全自动，或使用 deliveryDraft 草拟后由用户发送' };
-    }
-    if (isLockedOut(cfg)) return { applied: false, message: `冷却期内不可投递（剩余约 ${Math.ceil(cooldownRemaining(cfg) / 60000)} 分钟）` };
-    // 审查 #23 后续 · 批次 13：账号级「已用」必须与额度（effectiveDailyCap，只累加**已启用**平台）
-    // 同源 —— 用 enabledSentCount 而非 dailySentCount（后者含已关闭平台的历史投递，会把账号误判为已满）。
-    if (enabledSentCount(cfg, data.pending) >= effectiveDailyCap(cfg)) return { applied: false, message: `今日已达上限 ${effectiveDailyCap(cfg)} 条` };
-    let item: PendingItem | undefined;
-    if (id) {
-      item = data.pending.find((p) => p.id === String(id));
-      if (!item) return { applied: false, message: `待沟通岗位不存在：${id}` };
-    } else {
-      item = rerankPending(data.pending, cfg).find(
-        (p) =>
-          (p.status === 'approved' || p.status === 'opened') &&
-          !isDeliveryClaimed(p.id, String(p.job?.platform || 'boss')) &&
-          platformEnabled(cfg, String(p.job?.platform || 'boss') as JobPlatform)
-      );
-    }
-    if (!item) return { applied: false, message: '没有可单步沟通的岗位（需 status∈approved/opened 且平台已启用）' };
-    if (!(item.deliveryGreeting || '').trim()) return { applied: false, message: '该岗位招呼语为空，拒绝发送' };
-    auto.chatOne(item);
-    return {
-      applied: true,
-      message: '已触发单条沟通（结果异步，可轮询 autochatStatus / bossclaw_app_state）',
-      next: { id: item.id, title: item.job?.title, company: item.job?.company, note: '异步' },
-    };
-  },
+  autochatStep: () => ({ applied: false, message: '请在自动沟通页面核对消息并通过确认弹窗发送' }),
 
   autochatStatus: () => {
     const auto = useAutoChatStore.getState();
@@ -820,18 +751,7 @@ const handlers: Record<string, Handler> = {
     return { applied: true, message: `已按优先级重排 ${next.length} 条`, next: { reordered: next.length } };
   },
 
-  pendingPromote: ({ ids }) => {
-    const cfg = useSettingsStore.getState().config;
-    const data = useDataStore.getState();
-    let base = data.pending;
-    if (Array.isArray(ids) && ids.length) {
-      const set = new Set(ids.map(String));
-      base = base.filter((p) => set.has(p.id));
-    }
-    const r = promoteApprovedToQueue(base, cfg);
-    data.setPending(r.next);
-    return { applied: r.count > 0, message: `已将 ${r.count} 条 approved 提升为 approved_queue`, next: { count: r.count } };
-  },
+  pendingPromote: () => ({ applied: false, message: '请在应用内核对队列并通过确认弹窗启动投递' }),
 
   pendingRemove: ({ id }) => {
     const data = useDataStore.getState();

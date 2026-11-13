@@ -738,7 +738,7 @@ export default function Tasks() {
                 </div>
                 <div className="task-actions-right">
                   {p.status === 'pending' ? (
-                    <Button size="small" type="primary" className="task-approve-btn" icon={<CheckCircleFilled />} onClick={() => onApprove(p.id)}>
+                    <Button size="small" type="primary" className="task-approve-btn" title="仅加入待投递队列，不会发送消息" icon={<CheckCircleFilled />} onClick={() => onApprove(p.id)}>
                       确认沟通
                     </Button>
                   ) : p.status === 'approved' ? (

@@ -71,6 +71,7 @@ export const useSettingsStore = create<SettingsState>()(
       // P30：安全持久化——config 变更（含暂停冷却 pausedUntil 等安全字段）不得因 localStorage
       // 配额异常向上抛错中断引擎/UI；防抖合批也避免高频 setConfig 触发全量序列化
       storage: createSafePersistStorage(),
+      partialize: (s) => ({ config: { ...s.config, executionMode: 'review' as const } }),
       // 浅合并持久化配置到最新 DEFAULT_CONFIG，自动补齐新增的安全字段
       // （老用户 localStorage 中缺少 maxDailySent 等字段时回退到安全默认值）。
       // P2-06：历史迁移收敛到 migrations/settingsMigrations.ts 注册表；
@@ -94,6 +95,7 @@ export const useSettingsStore = create<SettingsState>()(
             ...(current as SettingsState).config,
             ...legacy.cleaned,
             ...migrated,
+            executionMode: 'review',
           },
         };
       },

@@ -18,14 +18,14 @@ try {
     stdin: { contents: `export {useMatchAnalysisStore as m} from './src/store/useMatchAnalysisStore';
       export {useDataStore as d} from './src/store/useDataStore';
       export {useSettingsStore as c} from './src/store/useSettingsStore';
-      export {useAppStore as a} from './src/store/useAppStore';`, resolveDir: root, loader: 'ts' },
+      export {useAppStore as a} from './src/store/useAppStore';
+      export {useAutoChatStore as auto} from './src/store/useAutoChatStore';`, resolveDir: root, loader: 'ts' },
     bundle: true, platform: 'node', format: 'cjs', outfile, logLevel: 'silent',
     plugins: [{ name: 'no-external-actions', setup(b) {
       b.onLoad({ filter: /\/matching\.ts$/ }, () => ({ contents: 'export const analyzeJob = (...args) => globalThis.matchStub(...args);', loader: 'ts' }));
-      b.onLoad({ filter: /\/useAutoChatStore\.ts$/ }, () => ({ contents: 'export const useAutoChatStore = {getState:()=>({chatRunning:false,watchRunning:false})};', loader: 'ts' }));
     } }],
   });
-  const { m, d, c, a } = createRequire(import.meta.url)(outfile);
+  const { m, d, c, a, auto } = createRequire(import.meta.url)(outfile);
   const old = { score: 50, scoreSource: 'local', greeting: '原招呼语', decision: 'cautious', hardBlocks: [], matchedEvidence: [], gaps: [], risks: [], reason: '旧结果' };
   const job = id => ({ id, job: { title: 'Agent开发', description: '负责RAG与记忆系统', url: `https://example.invalid/${id}` }, status: 'pending', deliveryGreeting: '用户编辑的招呼语', createdAt: 1, analysis: old });
   const ok = () => ({ ...old, score: 88, scoreSource: 'ai', greeting: '模型擅自改写的招呼语' });
@@ -41,6 +41,23 @@ try {
   };
   let passed = 0;
   const check = (actual, expected) => { assert.deepEqual(actual, expected); passed++; };
+
+  // Old app versions saved a live sending flag. Rehydration must never resume it.
+  storage.set('bossclaw-app', JSON.stringify({state:{autoAssist:true,engineStatus:'running',theme:'dark'},version:0}));
+  await a.persist.rehydrate();
+  check(a.getState().autoAssist, false); check(a.getState().engineStatus, 'stopped'); check(a.getState().theme, 'dark');
+  a.getState().setAutoAssist(true);
+  check('autoAssist' in a.persist.getOptions().partialize(a.getState()), false);
+  a.getState().setAutoAssist(false);
+  storage.set('bossclaw-settings-v2', JSON.stringify({state:{config:{executionMode:'auto'}},version:0}));
+  await c.persist.rehydrate(); check(c.getState().config.executionMode, 'review');
+  c.getState().setConfig({executionMode:'auto'});
+  check(c.persist.getOptions().partialize(c.getState()).config.executionMode, 'review');
+  check(auto.getState().chatRunning, false); check(auto.getState().watchRunning, false);
+  reset([]); auto.getState().start(); await Promise.resolve();
+  check(auto.getState().chatRunning, false);
+  d.setState({pending:[{...job('later'),status:'approved'}]});
+  check(auto.getState().chatRunning, false); check(d.getState().pending[0].status, 'approved');
 
   reset(); await m.getState().start(['a', 'a']);
   check(m.getState().succeeded, 1);
