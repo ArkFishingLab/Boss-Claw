@@ -113,6 +113,23 @@ try {
   await page.getByRole('dialog').waitFor({state:'hidden'});
   assert.equal((await action('state')).next.settings.config.executionMode,'review');
   checks.push('Enabling automatic mode requires confirmation; cancel retains manual review');
+  await surface().getByRole('tab',{name:/求职偏好/}).evaluate(el=>el.click());
+  const hrSelect = surface().locator('.sg-item').filter({has:page.getByText('HR 活跃度过滤',{exact:true})}).locator('.ant-select-selector');
+  for (let opening=0; opening<2; opening++) {
+    await hrSelect.dispatchEvent('mousedown');
+    const popup = page.locator('.ant-select-dropdown:not(.ant-select-dropdown-hidden)').last();
+    await popup.waitFor({state:'visible'});
+    await page.waitForFunction(() => {
+      const p=document.querySelector('.ant-select-dropdown:not(.ant-select-dropdown-hidden)');
+      if (!p) return false;
+      const r=p.getBoundingClientRect();
+      return r.width>0 && r.height>0 && r.left>=0 && r.top>=0 && r.right<=innerWidth+1 && r.bottom<=innerHeight+1;
+    });
+    await page.screenshot({path:resolve(artifactDir,`hr-select-open-${opening+1}.png`)});
+    await popup.locator('.ant-select-item-option').first().dispatchEvent('click');
+    await popup.waitFor({state:'hidden'});
+  }
+  checks.push('HR activity select stays on screen on first open and pre-mounted reopen');
   await action('navigate',{route:'workbench'});
   await surface().getByRole('button',{name:/一键投递$/}).evaluate(el=>el.click());
   assert((await page.getByRole('dialog').innerText()).includes('开始实际投递'));
